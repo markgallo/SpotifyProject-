@@ -1,0 +1,491 @@
+---
+title: "Spotify US Visualization"
+author: "Mark Gallo"
+due date: '2019-12-13'
+output:
+  html_notebook:
+    toc: yes
+  html_document:
+    highlight: textmate
+    theme: flatly
+    toc: yes
+ 
+---
+
+
+```{r}
+library(httr)
+library(jsonlite)
+library(xml2)
+library(XML)
+library(stringr)
+library(purrr)
+library(dplyr)
+library(stringr)
+library(sylly.en)
+library(data.table)
+library(curl)
+
+library(leaflet)
+library(tidyverse)
+library(varhandle)
+library(shiny)
+library(RColorBrewer)
+library(tibble)
+library(shinydashboard)
+library(flexdashboard)
+library(DT)
+library(sp)
+library(reprex)
+library(usmap)
+```
+
+```{r}
+usethis::edit_r_environ()
+```
+
+### Get Access to Spotify 
+#### Source Code: https://github.com/charlie86/spotifyr
+#### Insert Spotify API Client / Secret 
+
+```{r}
+get_spotify_access_token <- function(client_id =Sys.getenv('SPOTIFY_CLIENT_ID'), client_secret = Sys.getenv('SPOTIFY_CLIENT_SECRET')) {
+
+    post <- RETRY('POST', 'https://accounts.spotify.com/api/token',
+                 accept_json(), authenticate(client_id, client_secret),
+                 body = list(grant_type = 'client_credentials'),
+                 encode = 'form', httr::config(http_version = 2)) %>% content
+
+    if (!is.null(post$error)) {
+        stop(str_glue('Could not authenticate with given Spotify credentials:\n\t{post$error_description}'))
+    }
+
+    access_token <- post$access_token
+
+    return(access_token)
+}
+
+```
+
+
+```{r}
+access_token <- get_spotify_access_token()
+```
+
+#### Source Code: https://github.com/charlie86/spotifyr
+#### Insert Spotify API Client / Secret 
+
+```{r}
+get_spotify_authorization_code <- function(client_id = Sys.getenv('SPOTIFY_CLIENT_ID'), client_secret = Sys.getenv('SPOTIFY_CLIENT_SECRET'), scope = spotifyr::scopes) {
+    endpoint <- oauth_endpoint(authorize = 'https://accounts.spotify.com/authorize', access = 'https://accounts.spotify.com/api/token')
+    app <- oauth_app('spotifyr', client_id, client_secret)
+    oauth2.0_token(endpoint = endpoint, app = app, scope = scope)
+}
+```
+
+#### Source Code: https://github.com/charlie86/spotifyr
+#### Inserty Spotify Client / Client  
+
+```{r}
+get_playlist <- function(playlist_id, fields = NULL, market = NULL, authorization = get_spotify_access_token(Sys.getenv('SPOTIFY_CLIENT_ID'),Sys.getenv('SPOTIFY_CLIENT_SECRET'))) {
+    base_url <- 'https://api.spotify.com/v1/playlists'
+    url <- str_glue('{base_url}/{playlist_id}')
+    params <- list(
+        fields = paste(fields, collapse = ','),
+        market = market,
+        access_token = authorization
+    )
+    res <- RETRY('GET', url, query = params, encode = 'json')
+    stop_for_status(res)
+    res <- fromJSON(content(res, as = 'text', encoding = 'UTF-8'), flatten = TRUE)
+    return(res)
+}
+
+```
+
+### Generate Data
+#### Generate Data Frames of Artists on Spotify Playlists
+
+```{r}
+spotUSTop50 <- get_playlist("37i9dQZEVXbLRQDuF5jeBp")
+spotUSTopRap <- get_playlist("37i9dQZF1DX0XUsuxWHRQd")
+spotUSTopCounty <- get_playlist("37i9dQZF1DX1lVhptIYRda")
+
+```
+
+```{r}
+
+top50sp <- spotUSTop50$tracks$items$track.album.artists
+topUSRap <- spotUSTopRap$tracks$items$track.album.artists
+topUSCountry <- spotUSTopCounty$tracks$items$track.album.artists
+```
+
+
+```{r}
+US_Top50_Artists_Spotify <- as.data.frame(unlist(lapply(top50sp,function(x) x[1,3])))
+US_Top50_Artists_Spotify<-setNames(US_Top50_Artists_Spotify, "US Top 50 Spotify")
+
+US_TopRap_Artists_Spotify <- as.data.frame(unlist(lapply(topUSRap,function(x) x[1,3])))
+US_TopRap_Artists_Spotify<-setNames(US_TopRap_Artists_Spotify, "US Top Rap Spotify")
+
+US_TopCountry_Artists_Spotify <- as.data.frame(unlist(lapply(topUSCountry,function(x) x[1,3])))
+US_TopCountry_Artists_Spotify<-setNames(US_TopCountry_Artists_Spotify, "US Top Country Spotify")
+
+```
+
+### Function To Expidite Process
+#### The function requires a Spotify Playlist Code as a String (can be found on Spotify Web Player @ end of URL)
+
+```{r}
+
+getPlaylistArtist <- function(x){
+  gp <- get_playlist(x)
+  tg <- gp$tracks$items$track.album.artists
+  uts <- as.data.frame(unlist(lapply(tg,function(y) y[1,3])))
+  futs <- setNames(uts, "Artists")
+  return(futs)
+}
+
+```
+
+#Example of a playlist Get - Returns a data frame 
+
+```{r}
+playlistGet <- getPlaylistArtist("37i9dQZEVXbLRQDuF5jeBp")
+```
+
+
+### Access Seat Geek 
+
+```{r}
+sgURL <- "https://api.seatgeek.com/2/events?"
+```
+
+
+
+```{r}
+
+query_params <- list("client_id" = Sys.getenv('SEATGEEK_CLIENT_ID'), "performers.slug" = "billie-eilish")
+sgGet <- GET(sgURL, query = query_params)
+sgData <- fromJSON(content(sgGet, "text"))
+
+```
+
+### Function to obtain performance data from those on the playlist, as determined by SeatGeek
+#### Insert SeatGeek API Client 
+
+
+```{r}
+
+sgPerfroamnce <-  function(p = "Lil-Baby", client_id = Sys.getenv('SEATGEEK_CLIENT_ID')){
+ 
+  query_params <- list("client_id" = client_id, "performers.slug" = p )
+  sgGet <- GET(sgURL, query = query_params)
+  sgData <- fromJSON(content(sgGet, "text"))
+
+  if(is.null(sgData$events$venue$city[1])){
+    sgData$events$venue$city[1] = NA
+    sgData$events$venue$state[1] = NA
+    sgData$events$datetime_local[1] = NA
+    sgData$events$stats$average_price[1] = NA 
+    sgData$events$venue$name[1] = NA
+    sgData$events$venue$location$lat[1] = NA
+    sgData$events$venue$location$lon[1] = NA
+    sgData$events$popularity[1] = NA
+    sgData$events$stats$lowest_price[1] = NA
+    
+  }
+
+perfData <- data.frame(cbind(sgData$events$venue$city[1],sgData$events$venue$state[1],sgData$events$datetime_local[1],sgData$events$stats$average_price[1],sgData$events$venue$name[1],sgData$events$venue$location$lat[1], sgData$events$venue$location$lon[1], sgData$events$popularity[1], sgData$events$stats$lowest_price[1]))
+
+perfData <- cbind(p, perfData)
+#setNames(perfData, c("Artist","City","State", "Data & Time", "Avg Price", "lat","lon" ))
+
+
+}
+```
+
+```{r}
+View(sgPerfroamnce("My Chemical Romance",Sys.getenv('SEATGEEK_CLIENT_ID')))
+```
+
+
+### Function to make table out all upcomming performances by artists in given playlist 
+#### Insert SeatGeek Client ID 
+
+```{r}
+data <- data.table()
+makeTable <- function(artist_data, client_id = Sys.getenv('SEATGEEK_CLIENT_ID')){
+ 
+ 
+   for(a in artist_data){
+    dash <- (str_replace_all(a, " ", "-"))
+    for(d in dash){
+      data <- rbind(data, sgPerfroamnce(d,client_id))
+    }
+    data <-setNames(data, c("Artist","City","State", "Data & Time", "Avg Price","Venue","lat","lng", "Popularity", "Lowest Price" ))
+    return(data)
+  }
+}
+```
+
+#Make table given out of function of getting artists from given spotify id
+Pop, Rap, and Country come included with the dashboard 
+
+#### Insert SeatGeek API Client 
+
+
+```{r}
+
+topPop <- makeTable(getPlaylistArtist("37i9dQZEVXbLRQDuF5jeBp"), Sys.getenv('SEATGEEK_CLIENT_ID'))
+topRap<- makeTable(getPlaylistArtist("37i9dQZF1DX0XUsuxWHRQd"),Sys.getenv('SEATGEEK_CLIENT_ID'))
+topCountry <- makeTable(getPlaylistArtist("37i9dQZF1DX1lVhptIYRda"),Sys.getenv('SEATGEEK_CLIENT_ID'))
+
+
+```
+
+
+### Gather Data into groups by genre and combine to one Data Frame to be accessed when using drop down selection 
+
+```{r}
+pop <- topPop[complete.cases(topPop), ]
+
+pop$Playlist <- "Pop"
+rap <- topRap[complete.cases(topRap),]
+rap$Playlist <- "Rap"
+country <- topCountry[complete.cases(topCountry),]
+country$Playlist <- "Country"
+
+
+allgenre <- rbind(pop,rap,country)
+#colnames(allgenre)[which(names(allgenre) == "State")] <- "state"
+colnames(allgenre)[which(names(allgenre) == "Data & Time")] <- "Date & Time"
+colnames(allgenre)[which(names(allgenre) == "State")] <- "state"
+allgenre$`Avg Price` <- unfactor(allgenre$`Avg Price`)
+allgenre$`Lowest Price` <-unfactor(allgenre$`Lowest Price`)
+allgenre <- unique(allgenre[,c("Artist", "City", "state", "Avg Price", "Date & Time", "Lowest Price", "Playlist" )])
+allgenre
+```
+
+
+### Adding a new playlist to the dashboard, use gatherAll with Spotify Playlist ID
+#### change gat$genre (Line 277) and the genres vector (Line 297) to have the same name 
+#### Insert SeatGeek Client ID 
+
+```{r}
+gatherAll <- function(x, client_id = Sys.getenv('SEATGEEK_CLIENT_ID')){
+  u <- makeTable(getPlaylistArtist(x), client_id)
+  gat <- u[complete.cases(u), ]
+  gat$Playlist <- "MG Top Songs 2019"
+  allgenre <- rbind(pop,rap,country,gat)
+  colnames(allgenre)[which(names(allgenre) == "Data & Time")] <- "Date & Time"
+  colnames(allgenre)[which(names(allgenre) == "State")] <- "state"
+  allgenre <- unique(allgenre[,c("Artist", "City", "state", "Avg Price", "Date & Time", "Lowest Price", "Playlist" )])
+  allgenre$`Avg Price` <- unfactor(allgenre$`Avg Price`)
+  allgenre$`Lowest Price` <- unfactor(allgenre$`Lowest Price`)
+  return(allgenre)
+}
+```
+
+```{r}
+allgenre <- gatherAll("37i9dQZF1Etmtc0GVuIsZH", Sys.getenv('SEATGEEK_CLIENT_ID'))
+```
+
+
+
+```{r}
+
+PopAv <- allgenre %>% filter(Playlist == "Pop") %>% group_by(state) %>% summarise(round(mean(`Avg Price`)))
+PopAv <- setNames(PopAv, c("state", "Price"))
+PopAv$name <- "PopAvgPrices"
+
+PopLow <- allgenre %>% filter(Playlist == "Pop") %>% group_by(state) %>% summarise(round(mean(`Lowest Price`)))
+PopLow <- setNames(PopLow, c("state", "Price"))
+PopLow$name <- "PopLowPrices"
+
+RapAv <- allgenre %>% filter(Playlist == "Rap") %>% group_by(state) %>% summarise(round(mean(`Avg Price`)))
+RapAv <- setNames(RapAv, c("state", "Price"))
+RapAv$name <- "RapAvgPrices"
+
+RapLow <- allgenre %>% filter(Playlist == "Rap") %>% group_by(state) %>% summarise(round(mean(`Lowest Price`)))
+RapLow <- setNames(RapLow, c("state", "Price"))
+RapLow$name <- "RapLowPrices"
+
+CountryAv <- allgenre %>% filter(Playlist == "Country") %>% group_by(state) %>% summarise(round(mean(`Avg Price`)))
+CountryAv <- setNames(CountryAv, c("state", "Price"))
+CountryAv$name <- "CountryAvgPrices"
+
+CountryLow <- allgenre %>% filter(Playlist == "Country") %>% group_by(state) %>% summarise(round(mean(`Lowest Price`)))
+CountryLow <- setNames(CountryLow, c("state", "Price"))
+CountryLow$name <- "CountryLowPrices"
+
+allMeans <- rbind(PopAv, PopLow, RapAv, RapLow, CountryAv, CountryLow)
+
+```
+
+
+```{r}
+chartData <- function(getname = "MG Top Song 2019", sortBy = ""){
+  
+  if(sortBy == "Avg Price"){
+  topdata <- allgenre %>% filter(Playlist == getname) %>% group_by(state) %>% summarise(round(mean(`Avg Price`)))
+  topdata <- setNames(topdata, c("state", "Price"))
+  topdata$name <- paste(getname, "Avg")
+  
+  }
+  
+  if(sortBy == "Lowest Price"){
+  topdata <- allgenre %>% filter(Playlist == getname) %>% group_by(state) %>% summarise(round(mean(`Lowest Price`)))
+  topdata <- setNames(topdata, c("state", "Price"))
+  topdata$name <- paste(getname, "Low")
+  
+  }
+  allMeans <- rbind(PopAv, PopLow, RapAv, RapLow, CountryAv, CountryLow, topdata)
+  return(allMeans)
+}
+
+```
+ 
+### Once a new playlist has been added to the data frame this funtion makes it simple to allow graphical analysis to be run
+ 
+```{r}
+allMeansMG <- chartData("MG Top Songs 2019", "Lowest Price")
+```
+
+#Dashboard
+
+
+```{r}
+
+genres <- c("Pop", "Rap", "Country", "MG Top Songs 2019")
+pricing <- c("PopAvgPrices", "PopLowPrices","RapAvgPrices", "RapLowPrices", "CountryAvgPrices", "CountryLowPrices", "MG Top Songs 2019 Low")
+
+bins <- c(0, 10, 20, 50, 100, 200, 500, 1000, Inf)
+pal <- colorBin("Greens", domain = c(0,2000), bins = bins)
+
+ui <- dashboardPage(
+  skin = "green",
+  dashboardHeader(title = "Concert Ticket Prices Spotify & Seat Geek", titleWidth = 400),
+  dashboardSidebar(selectInput("genre", label = "Choose Playlist",choices = genres, selected = "Pop")),
+  
+  
+  dashboardBody(
+    
+     fluidRow(column(width = 4, box(width = NULL, status = "warning", uiOutput("pricing"), selectInput("pricing", label = "Sort Graphs By:",choices = pricing, selected = "RapAvgPrices")))),
+    fluidRow(downloadButton('downloadData', 'Download Playlist CSV')),
+    fluidRow(column(width = 12, box(width = NULL, splitLayout(cellWidths = c("50%", "50%") , plotOutput("plot"), plotOutput("barplot"))),
+                    box(width = NULL, dataTableOutput(outputId = "summary_table")))),
+    
+    
+    #selectInput("genre", label = "Genre",choices = genres, selected = "Pop")),
+    #fluidRow(column(widthbox(width = 9, dataTableOutput(outputId = "summary_table"))),
+    #fluidRow(textOutput(outputId = "genre_shp"))),
+  )
+  
+  
+  
+)
+server <- function(input, output, session){
+  
+  
+  
+  #text <- reactive({input$genre})
+  #text2 <- reactive({text()})
+  
+  
+  
+   #renderLeaflet({genre_shp <- Allgenre[Allgenre$genre == input$genre,]})
+  
+  genre_shp <- reactive(allgenre[allgenre$Playlist == input$genre,])
+  
+  
+  #allgenre$`Avg Price` allgenre$`Lowest Price`
+    
+  pricing_shp <- reactive(allMeansMG[allMeansMG$name == input$pricing,])
+    
+    
+   
+  
+ 
+  #labels <- reactive({sprintf(
+  #"<strong>%s</strong><br/>Average Price: $%g <br/>%s </br> %s, %s <br/> %s ",
+  #genre_shp()$Artist, genre_shp()$`Avg Price`, genre_shp()$Venue, genre_shp()$City, genre_shp()$name, dataMap$`Data & Time`
+#) %>% lapply(htmltools::HTML)})
+    
+  
+  
+  #output$mymap <- renderLeaflet({
+  
+  #leaflet(SpatialPolygons(genre_shp()))%>%
+  #setView(-96, 37.8, 4) %>%
+  #addProviderTiles("MapBox", options = providerTileOptions(
+   # id = "mapbox.light",
+  #  accessToken = Sys.getenv('MAPBOX_ACCESS_TOKEN'))) %>%
+  #addPolygons(
+  #  fillColor = ~pal(genre_shp()$`Avg Price`),
+   # weight = 2,
+    #opacity = 1,
+    #color = "white",
+    #dashArray = "3",
+    #fillOpacity = 0.7,
+    #highlight = highlightOptions(
+     # weight = 5,
+      #color = "#666",
+      #dashArray = "",
+      #fillOpacity = 0.7,
+      #bringToFront = TRUE),
+    #label = labels,
+    #labelOptions = labelOptions(
+     # style = list("font-weight" = "normal", padding = "3px 8px"),
+      #textsize = "15px",
+      #direction = "auto")) %>%
+  #addLegend(pal = pal, 
+   #         values = genre_shp()$`Avg Price`, opacity = 0.7, title = NULL,
+  #  position = "bottomright")
+  #})
+    
+  
+   output$summary_table <- renderDataTable(data.frame(genre_shp()))
+   
+   #Source: https://shiny.rstudio.com/reference/shiny/latest/downloadButton.html
+
+   output$downloadData <- downloadHandler(
+    filename = function() { 
+      paste(input$genre,"MusicData", '.csv', sep='')
+      },
+    content = function(file) {
+      write.csv(genre_shp(), file)
+    })
+   
+    output$plot<-renderPlot({
+      
+    plot_usmap(data = pricing_shp(), values = "Price", color = "white") + 
+  scale_fill_continuous(low = "#C9E6B2", high = "#1ED761", name = "Ticket Prices (USD)", label = scales::comma)+ 
+  theme(legend.position = "right",legend.background = element_rect("white"),
+        legend.box.background =   element_rect())+
+        labs(title = paste(input$pricing, "For Concert Tickets Across US"), subtitle = "As According to Spotify & SeatGeek")})
+
+   
+   output$barplot <-renderPlot({
+     ggplot(data = pricing_shp(),  aes(x = state, y = `Price` ))+ 
+              geom_bar(stat = "identity", fill = "#1ED761")+
+              ggtitle(paste(input$pricing, "of Concert Tickets on SeatGeek By State"))
+   })
+  
+
+}
+shinyApp(ui=ui, server = server)
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
